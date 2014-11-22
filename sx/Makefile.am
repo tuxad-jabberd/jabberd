@@ -1,3 +1,4 @@
+INCLUDES = -DCONFIG_DIR=\"$(sysconfdir)\"
 LIBTOOL += --quiet
 
 noinst_LTLIBRARIES = libsx.la

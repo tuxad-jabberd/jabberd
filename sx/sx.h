@@ -29,6 +29,9 @@
 
 #include <expat.h>
 #include <util/util.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 /* jabberd2 Windows DLL */
 #ifndef JABBERD2_API

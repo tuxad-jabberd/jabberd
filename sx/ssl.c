@@ -25,7 +25,11 @@
 
 #include "sx.h"
 #include <openssl/x509_vfy.h>
+#include "sx/tls-dh-callback.c"
 
+char *ssl_cipher_suite = 0;
+char cipher_suite_buf[1025];
+char default_cipher_suite[] = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-SHA256:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES128-SHA256:DHE-RSA-AES256-SHA256:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA:DHE-RSA-AES256-SHA:ALL:+aRSA:!NULL:!ADH:!EXP:!3DES:!kKRB5:!aDSS:!DES:!aPSK:!kECDH:!SEED:!RC2:!IDEA:!CAMELLIA:!AES256-GCM-SHA384:!AES256-SHA256:!AES256-SHA:!AES128-GCM-SHA256:!AES128-SHA256:!kECDH:!AECDH:!MD5:AES128-SHA";
 
 /* code stolen from SSL_CTX_set_verify(3) */
 static int _sx_ssl_verify_callback(int preverify_ok, X509_STORE_CTX *ctx)
@@ -864,6 +868,11 @@ int sx_ssl_server_addcert(sx_plugin_t p, char *name, char *pemfile, char *cachai
     STACK_OF(X509_NAME) *cert_names;
     X509_STORE * store;
     int ret;
+    int fd;
+#if defined(SSL_TXT_ECDH) && !defined(SSL_CTRL_SET_ECDH_AUTO)
+    EC_KEY *ecdh;
+    int nid;
+#endif
 
     if(!sx_openssl_initialized) {
         _sx_debug(ZONE, "ssl plugin not initialised");
@@ -886,8 +895,28 @@ int sx_ssl_server_addcert(sx_plugin_t p, char *name, char *pemfile, char *cachai
         return 1;
     }
 
+    /* disable old protocols; ignore errors/don't check bitmask */
+    SSL_CTX_set_options(ctx, (SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3));
+
     // Set allowed ciphers
-	if (SSL_CTX_set_cipher_list(ctx, "ALL:!LOW:!SSLv2:!EXP:!aNULL") != 1) {
+    if (ssl_cipher_suite == 0) {
+        fd = open(CONFIG_DIR "/SSLCipherSuite", O_RDONLY);
+        if (fd >= 0) {
+            int len;
+            len = read(fd, cipher_suite_buf, 1024);
+            if (len > 1) {
+                cipher_suite_buf[len] = 0;
+                --len;
+                if (cipher_suite_buf[len] == '\n') cipher_suite_buf[len] = 0;
+                ssl_cipher_suite = cipher_suite_buf;
+            }
+            close(fd);
+        }
+    }
+    if (ssl_cipher_suite == 0) {
+	ssl_cipher_suite = default_cipher_suite;
+    }
+    if (SSL_CTX_set_cipher_list(ctx, ssl_cipher_suite) != 1) {
         _sx_debug(ZONE, "Can't set cipher list for SSL context: %s", ERR_error_string(ERR_get_error(), NULL));
         SSL_CTX_free(ctx);
         return 1;
@@ -946,6 +975,40 @@ int sx_ssl_server_addcert(sx_plugin_t p, char *name, char *pemfile, char *cachai
         SSL_CTX_free(ctx);
         return 1;
     }
+
+/*
+    DH *dh = get_dh1024();
+    ret = SSL_CTX_set_tmp_dh (ctx, dh);
+    if(ret != 1) {
+        _sx_debug(ZONE, "couldn't set dh params with SSL_CTX_set_tmp_dh()");
+        DH_free (dh);
+        return 1;
+    }
+*/
+    SSL_CTX_set_tmp_dh_callback(ctx, sx_ssl_tmp_dh_callback);
+
+#ifdef SSL_TXT_ECDH
+    SSL_CTX_set_options(ctx, SSL_OP_SINGLE_ECDH_USE);
+#ifdef SSL_CTRL_SET_ECDH_AUTO
+    /* OpenSSL >= 1.0.2 */
+    SSL_CTX_set_ecdh_auto(ctx, 1);
+#else
+    ecdh = EC_KEY_new_by_curve_name(NID_secp256k1);
+    /* insecure and compatible curves as fallbacks, see http://safecurves.cr.yp.to/ */
+    if (ecdh == NULL) {
+        /* NIST P-384 / AES-256 */
+        ecdh = EC_KEY_new_by_curve_name(NID_secp384r1);
+    }
+    if (ecdh == NULL) {
+        /* NIST P-256 / AES-128 */
+        ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    }
+    if (ecdh != NULL) {
+        SSL_CTX_set_tmp_ecdh(ctx, ecdh);
+        EC_KEY_free(ecdh);
+    }
+#endif
+#endif
 
     _sx_debug(ZONE, "setting ssl context '%s' verify mode to %02x", name, mode);
     SSL_CTX_set_verify(ctx, mode, _sx_ssl_verify_callback);
