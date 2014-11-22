@@ -896,7 +896,11 @@ int sx_ssl_server_addcert(sx_plugin_t p, char *name, char *pemfile, char *cachai
     }
 
     /* disable old protocols; ignore errors/don't check bitmask */
+#ifdef SSL_TXT_ECDH
+    SSL_CTX_set_options(ctx, (SSL_OP_NO_TLSv1 | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3));
+#else
     SSL_CTX_set_options(ctx, (SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3));
+#endif
 
     // Set allowed ciphers
     if (ssl_cipher_suite == 0) {
