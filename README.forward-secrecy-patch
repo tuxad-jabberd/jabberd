@@ -1,0 +1,404 @@
+Frank Bergmann
+http://www.tuxad.com
+2014-11-08 - 2014-11-22
+
+http://www.tuxad.com/patches/jabberd-2.2.17.cipher-suite-and-forward-secrecy.patch
+
+forward secrecy patch for jabberd-2.2.17, short description
+-----------------------------------------------------------
+
+This patch modifies or creates the following files:
+- Makefile (tepmplates)
+- sx/ssl.c
+- sx/sx.h
+- sx/tls-dh.c and sx/tls-dh-callback.c
+
+The patch contains four enhancements:
+
+1) The default cipher list is set to a "modern" value which provides
+security and some light backward compatibility. The first ciphers in the
+list are all DH based ciphers for ephemeral keys with "simple" AES and
+RC4-SHA as last fallback. The cipher list is configurable by a file
+  /etc/jabberd/SSLCipherSuite
+at launch time. If this file does not exist then the builti default will
+be used. The file must not contain anything other than one line in
+"OpenSSL style". A LF as line termination is allowed and will be
+stripped.
+This mod should be disappointing for our friends at the NSA.
+
+2) To create DH keys a set of pre-computed DH params with 512, 1024 and
+2048 are built in. Additionally the files
+  /etc/jabberd/dh512.pem
+  /etc/jabberd/dh1024.pem
+  /etc/jabberd/dh2048.pem
+will be read if they exist. For new ssl connections the files will
+be checked again for existance. If the modtime of the needed file did
+change then it will be read. You should regularly create new params
+(i.e. by cron-weekly) with something like
+  openssl dhparam -out dh1024.tmp 1024 && mv dh1024.tmp dh1024.pem
+For package maintainers:
+When building a package please substitute the pre-computed values in
+sx/tls-dh.c by calling
+  openssl dhparam -C 512 -noout >sx/tls-dh.c
+  openssl dhparam -C 1024 -noout >>sx/tls-dh.c
+  openssl dhparam -C 2048 -noout >>sx/tls-dh.c
+on package build time. Please also do this for the packaged DH param
+files in /etc/jabberd.
+With this mod and the cron you will hear the NSA crying in silent
+nights.
+
+3) After calling SSL_CTX_new the options are set via
+  SSL_CTX_set_options(ctx, (SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3));
+to disable ancient protocols. This will make you, your customers/
+friends and also the IM Observatory happy and the NSA sad.
+
+4) When building on OpenSSL >= 1 there will also ECDH support compiled
+into Jabberd.
+
+As of 2014-11-21 there's no official jabberd2 release with DH / forward
+secrecy support.
+On github there's a commit of 2014-03-17 in the jabberd2 repository for
+DH support. But this commit seems to use only pre-computed DH params
+without making them configurable. This does not provide *real* forward
+secrecy.
+Apple's ChatServer is based on jabberd-2.2.17, too. But this patch was
+not tested with ChatServer.
+The patch offers configurable DH params and cipher suite in a very raw
+way. It seems to work but use it at your own risk. :-)
+
+Frank Bergmann
+2014-11-22
+
+
+
+--- jabberd-2.2.17.orig/sx/Makefile.am	2011-10-22 21:56:00.000000000 +0200
++++ jabberd-2.2.17/sx/Makefile.am	2014-11-14 12:10:32.000000000 +0100
+@@ -1,3 +1,4 @@
++INCLUDES = -DCONFIG_DIR=\"$(sysconfdir)\"
+ LIBTOOL += --quiet
+ 
+ noinst_LTLIBRARIES = libsx.la
+--- jabberd-2.2.17.orig/sx/Makefile.in	2012-08-26 13:59:55.000000000 +0200
++++ jabberd-2.2.17/sx/Makefile.in	2014-11-14 12:10:32.000000000 +0100
+@@ -219,6 +219,7 @@
+ top_build_prefix = @top_build_prefix@
+ top_builddir = @top_builddir@
+ top_srcdir = @top_srcdir@
++INCLUDES = -DCONFIG_DIR=\"$(sysconfdir)\"
+ noinst_LTLIBRARIES = libsx.la
+ noinst_HEADERS = plugins.h sasl.h sx.h
+ libsx_la_SOURCES = callback.c chain.c client.c env.c error.c io.c \
+--- jabberd-2.2.17.orig/sx/ssl.c	2012-02-12 22:38:25.000000000 +0100
++++ jabberd-2.2.17/sx/ssl.c	2014-11-22 02:36:27.000000000 +0100
+@@ -25,7 +25,11 @@
+ 
+ #include "sx.h"
+ #include <openssl/x509_vfy.h>
++#include "sx/tls-dh-callback.c"
+ 
++char *ssl_cipher_suite = 0;
++char cipher_suite_buf[1025];
++char default_cipher_suite[] = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-SHA256:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES128-SHA256:DHE-RSA-AES256-SHA256:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA:DHE-RSA-AES256-SHA:ALL:+aRSA:!NULL:!ADH:!EXP:!3DES:!kKRB5:!aDSS:!DES:!aPSK:!kECDH:!SEED:!RC2:!IDEA:!CAMELLIA:!AES256-GCM-SHA384:!AES256-SHA256:!AES256-SHA:!AES128-GCM-SHA256:!AES128-SHA256:!kECDH:!AECDH:!MD5:AES128-SHA";
+ 
+ /* code stolen from SSL_CTX_set_verify(3) */
+ static int _sx_ssl_verify_callback(int preverify_ok, X509_STORE_CTX *ctx)
+@@ -864,6 +868,11 @@
+     STACK_OF(X509_NAME) *cert_names;
+     X509_STORE * store;
+     int ret;
++    int fd;
++#if defined(SSL_TXT_ECDH) && !defined(SSL_CTRL_SET_ECDH_AUTO)
++    EC_KEY *ecdh;
++    int nid;
++#endif
+ 
+     if(!sx_openssl_initialized) {
+         _sx_debug(ZONE, "ssl plugin not initialised");
+@@ -886,8 +895,28 @@
+         return 1;
+     }
+ 
++    /* disable old protocols; ignore errors/don't check bitmask */
++    SSL_CTX_set_options(ctx, (SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3));
++
+     // Set allowed ciphers
+-	if (SSL_CTX_set_cipher_list(ctx, "ALL:!LOW:!SSLv2:!EXP:!aNULL") != 1) {
++    if (ssl_cipher_suite == 0) {
++        fd = open(CONFIG_DIR "/SSLCipherSuite", O_RDONLY);
++        if (fd >= 0) {
++            int len;
++            len = read(fd, cipher_suite_buf, 1024);
++            if (len > 1) {
++                cipher_suite_buf[len] = 0;
++                --len;
++                if (cipher_suite_buf[len] == '\n') cipher_suite_buf[len] = 0;
++                ssl_cipher_suite = cipher_suite_buf;
++            }
++            close(fd);
++        }
++    }
++    if (ssl_cipher_suite == 0) {
++	ssl_cipher_suite = default_cipher_suite;
++    }
++    if (SSL_CTX_set_cipher_list(ctx, ssl_cipher_suite) != 1) {
+         _sx_debug(ZONE, "Can't set cipher list for SSL context: %s", ERR_error_string(ERR_get_error(), NULL));
+         SSL_CTX_free(ctx);
+         return 1;
+@@ -947,6 +976,40 @@
+         return 1;
+     }
+ 
++/*
++    DH *dh = get_dh1024();
++    ret = SSL_CTX_set_tmp_dh (ctx, dh);
++    if(ret != 1) {
++        _sx_debug(ZONE, "couldn't set dh params with SSL_CTX_set_tmp_dh()");
++        DH_free (dh);
++        return 1;
++    }
++*/
++    SSL_CTX_set_tmp_dh_callback(ctx, sx_ssl_tmp_dh_callback);
++
++#ifdef SSL_TXT_ECDH
++    SSL_CTX_set_options(ctx, SSL_OP_SINGLE_ECDH_USE);
++#ifdef SSL_CTRL_SET_ECDH_AUTO
++    /* OpenSSL >= 1.0.2 */
++    SSL_CTX_set_ecdh_auto(ctx, 1);
++#else
++    ecdh = EC_KEY_new_by_curve_name(NID_secp256k1);
++    /* insecure and compatible curves as fallbacks, see http://safecurves.cr.yp.to/ */
++    if (ecdh == NULL) {
++        /* NIST P-384 / AES-256 */
++        ecdh = EC_KEY_new_by_curve_name(NID_secp384r1);
++    }
++    if (ecdh == NULL) {
++        /* NIST P-256 / AES-128 */
++        ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
++    }
++    if (ecdh != NULL) {
++        SSL_CTX_set_tmp_ecdh(ctx, ecdh);
++        EC_KEY_free(ecdh);
++    }
++#endif
++#endif
++
+     _sx_debug(ZONE, "setting ssl context '%s' verify mode to %02x", name, mode);
+     SSL_CTX_set_verify(ctx, mode, _sx_ssl_verify_callback);
+ 
+--- jabberd-2.2.17.orig/sx/sx.h	2012-02-12 21:38:07.000000000 +0100
++++ jabberd-2.2.17/sx/sx.h	2014-11-14 12:10:32.000000000 +0100
+@@ -29,6 +29,9 @@
+ 
+ #include <expat.h>
+ #include <util/util.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
+ 
+ /* jabberd2 Windows DLL */
+ #ifndef JABBERD2_API
+--- jabberd-2.2.17.orig/sx/tls-dh.c	1970-01-01 01:00:00.000000000 +0100
++++ jabberd-2.2.17/sx/tls-dh.c	2014-11-14 12:10:32.000000000 +0100
+@@ -0,0 +1,93 @@
++#ifndef HEADER_DH_H
++#include <openssl/dh.h>
++#endif
++
++DH *get_dh512()
++	{
++	static unsigned char dh512_p[]={
++		0xFB,0x09,0x6D,0x12,0xFC,0xA2,0x42,0x9A,0x67,0x04,0xF1,0xB1,
++		0x5D,0x5D,0xFB,0xA1,0xA7,0x85,0x4C,0x90,0x6D,0xFB,0xCF,0x01,
++		0x83,0xEA,0xD0,0x50,0x7F,0x12,0x72,0x6B,0xF7,0xAE,0x39,0xE4,
++		0x55,0x8D,0x47,0x55,0xCF,0x0F,0x8C,0x78,0xA3,0x49,0x6F,0xE0,
++		0x17,0x62,0xED,0x5A,0x88,0x21,0x52,0xA9,0x21,0x19,0xB6,0x10,
++		0x59,0xC3,0xCE,0x7B,
++		};
++	static unsigned char dh512_g[]={
++		0x02,
++		};
++	DH *dh;
++
++	if ((dh=DH_new()) == NULL) return(NULL);
++	dh->p=BN_bin2bn(dh512_p,sizeof(dh512_p),NULL);
++	dh->g=BN_bin2bn(dh512_g,sizeof(dh512_g),NULL);
++	if ((dh->p == NULL) || (dh->g == NULL))
++		{ DH_free(dh); return(NULL); }
++	return(dh);
++	}
++
++DH *get_dh1024()
++	{
++	static unsigned char dh1024_p[]={
++		0xB1,0xF5,0x95,0x80,0xFD,0x1C,0xC8,0x3C,0x29,0xF9,0x73,0xD2,
++		0xAD,0x1E,0x54,0x88,0x54,0x58,0x85,0xFC,0xC9,0x3F,0xDA,0xD9,
++		0x4C,0xA7,0x8E,0x0C,0x22,0xF7,0xD0,0x1D,0x78,0xC2,0x8F,0xF7,
++		0x3F,0x02,0x80,0x8B,0x32,0x5D,0xF9,0x45,0x73,0x36,0x5B,0x0E,
++		0xA6,0x23,0x6A,0x1C,0xD8,0x91,0xA9,0x0E,0x71,0xEE,0x61,0x9F,
++		0x4E,0x38,0x94,0xA7,0x49,0x85,0x80,0xE5,0xC0,0x2D,0xB3,0x7A,
++		0xF4,0x47,0xCD,0x10,0x1E,0xC9,0x99,0xEE,0x27,0x5C,0x3A,0x8B,
++		0x47,0x88,0x44,0x3C,0x13,0x92,0x7F,0xEF,0xD8,0x29,0xB2,0x75,
++		0x62,0x86,0xE2,0x88,0x7D,0x2E,0x79,0x26,0x16,0x08,0x74,0xD7,
++		0xE1,0xB0,0x1B,0x4C,0xB5,0xF8,0x25,0x54,0xC9,0x98,0xF6,0xB2,
++		0x35,0x65,0x9B,0x25,0xDB,0xA8,0xBA,0x2B,
++		};
++	static unsigned char dh1024_g[]={
++		0x02,
++		};
++	DH *dh;
++
++	if ((dh=DH_new()) == NULL) return(NULL);
++	dh->p=BN_bin2bn(dh1024_p,sizeof(dh1024_p),NULL);
++	dh->g=BN_bin2bn(dh1024_g,sizeof(dh1024_g),NULL);
++	if ((dh->p == NULL) || (dh->g == NULL))
++		{ DH_free(dh); return(NULL); }
++	return(dh);
++	}
++
++DH *get_dh2048()
++	{
++	static unsigned char dh2048_p[]={
++		0xB0,0x61,0xAB,0x20,0xEF,0x04,0x47,0xF5,0x5D,0x97,0xCE,0x30,
++		0xFB,0x15,0x1A,0x6E,0x09,0x37,0x0B,0x6A,0x35,0x35,0x5F,0xF5,
++		0xA2,0x97,0xC1,0x79,0xAB,0xD1,0x2D,0x07,0x45,0x5E,0x13,0xA0,
++		0x47,0x9D,0xAB,0x9C,0x18,0x52,0x0F,0xE4,0x9E,0x07,0xEB,0x22,
++		0x5E,0xE1,0xF8,0x35,0x79,0x22,0x1B,0x5E,0x65,0xED,0xB4,0x22,
++		0xEE,0xB3,0x32,0xAB,0xBE,0x71,0xFE,0x8D,0x4F,0x8F,0x8E,0x52,
++		0x34,0x7B,0xAC,0x04,0x19,0x0F,0xAC,0x08,0x98,0xEE,0x44,0xF1,
++		0x29,0x85,0xE9,0x0D,0x92,0xED,0xAA,0x75,0x96,0x7F,0xD7,0x17,
++		0x40,0xC4,0xD6,0xE7,0xDF,0x14,0x5A,0x88,0x02,0x75,0x97,0x95,
++		0xEE,0x85,0x5B,0xFF,0x19,0xCE,0x6B,0xFA,0xE0,0xBF,0x96,0xFC,
++		0x58,0x47,0xD4,0xD7,0xB6,0xA7,0x96,0xC9,0x77,0x81,0x03,0xDD,
++		0x07,0xE7,0xFE,0x23,0xB9,0x6A,0x1C,0x79,0xBB,0x4C,0x48,0x0A,
++		0xD6,0x65,0xC7,0xE2,0xDD,0x7D,0x6F,0x5D,0x49,0xF5,0x40,0xFC,
++		0xEE,0x69,0xBE,0xB6,0x05,0xC5,0xF6,0x80,0x64,0x6F,0xAF,0xB9,
++		0xE5,0x88,0xCE,0xFB,0xAF,0x6D,0xC4,0x71,0xD2,0x3B,0xCB,0xBA,
++		0xF1,0x9B,0x67,0xDF,0xAA,0x89,0x65,0x89,0xEC,0x39,0xFC,0xD6,
++		0x8E,0xA0,0xBD,0x34,0xBB,0xE1,0x9D,0x3E,0x58,0x8D,0xEE,0x8F,
++		0x05,0xE7,0x15,0xDE,0x34,0x10,0x5B,0xA9,0x7B,0xEC,0x29,0x9F,
++		0xED,0x48,0x07,0x6D,0x58,0x0D,0xE4,0xF2,0xEF,0x6F,0xC1,0x93,
++		0x67,0x85,0x48,0x72,0xA2,0x11,0xF0,0x16,0xD0,0xAC,0xA0,0xBB,
++		0xEA,0x0B,0x4A,0xB3,0x07,0xB2,0x97,0x1A,0x55,0x35,0x13,0x38,
++		0xCF,0x61,0x13,0xEB,
++		};
++	static unsigned char dh2048_g[]={
++		0x02,
++		};
++	DH *dh;
++
++	if ((dh=DH_new()) == NULL) return(NULL);
++	dh->p=BN_bin2bn(dh2048_p,sizeof(dh2048_p),NULL);
++	dh->g=BN_bin2bn(dh2048_g,sizeof(dh2048_g),NULL);
++	if ((dh->p == NULL) || (dh->g == NULL))
++		{ DH_free(dh); return(NULL); }
++	return(dh);
++	}
+--- jabberd-2.2.17.orig/sx/tls-dh-callback.c	1970-01-01 01:00:00.000000000 +0100
++++ jabberd-2.2.17/sx/tls-dh-callback.c	2014-11-21 13:39:05.000000000 +0100
+@@ -0,0 +1,106 @@
++#include "sx.h"
++#include <openssl/x509_vfy.h>
++#include "sx/tls-dh.c"
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <time.h>
++
++DH *dh_512 = 0;
++DH *dh_1024 = 0;
++DH *dh_2048 = 0;
++DH *dh_default_512 = 0;
++DH *dh_default_1024 = 0;
++DH *dh_default_2048 = 0;
++time_t ts_dh_512 = 0;
++time_t ts_dh_1024 = 0;
++time_t ts_dh_2048 = 0;
++
++void readget_dh512() {
++    struct stat sb;
++    FILE *file;
++
++    if (!dh_default_512) dh_default_512 = get_dh512();
++    if (!dh_512) dh_512 = dh_default_512;
++
++    if (stat(CONFIG_DIR "/dh512.pem", &sb) == 0) {
++        if (ts_dh_512 != sb.st_mtime) {
++            /* timestamp has changed */
++            file = fopen(CONFIG_DIR "/dh512.pem", "r");
++            if (file) {
++                if (dh_512 != dh_default_512) DH_free(dh_512);
++                ts_dh_512 = sb.st_mtime;
++                dh_512 = PEM_read_DHparams(file, 0, 0, 0);
++                fclose(file);
++            }
++        }
++    }
++
++    return;
++}
++
++void readget_dh1024() {
++    struct stat sb;
++    FILE *file;
++
++    if (!dh_default_1024) dh_default_1024 = get_dh1024();
++    if (!dh_1024) dh_1024 = dh_default_1024;
++
++    if (stat(CONFIG_DIR "/dh1024.pem", &sb) == 0) {
++        if (ts_dh_1024 != sb.st_mtime) {
++            /* timestamp has changed */
++            file = fopen(CONFIG_DIR "/dh1024.pem", "r");
++            if (file) {
++                if (dh_1024 != dh_default_1024) DH_free(dh_1024);
++                ts_dh_1024 = sb.st_mtime;
++                dh_1024 = PEM_read_DHparams(file, 0, 0, 0);
++                fclose(file);
++            }
++        }
++    }
++
++    return;
++}
++
++void readget_dh2048() {
++    struct stat sb;
++    FILE *file;
++
++    if (!dh_default_2048) dh_default_2048 = get_dh2048();
++    if (!dh_2048) dh_2048 = dh_default_2048;
++
++    if (stat(CONFIG_DIR "/dh2048.pem", &sb) == 0) {
++        if (ts_dh_2048 != sb.st_mtime) {
++            /* timestamp has changed */
++            file = fopen(CONFIG_DIR "/dh2048.pem", "r");
++            if (file) {
++                if (dh_2048 != dh_default_2048) DH_free(dh_2048);
++                ts_dh_2048 = sb.st_mtime;
++                dh_2048 = PEM_read_DHparams(file, 0, 0, 0);
++                fclose(file);
++            }
++        }
++    }
++
++    return;
++}
++
++
++static DH *sx_ssl_tmp_dh_callback(SSL *ssl, int export, int keylength) {
++    if (keylength == 512) {
++        readget_dh512();
++        return dh_512;
++    } else {
++        if (keylength == 1024) {
++            readget_dh1024();
++            return dh_1024;
++        } else {
++            if (keylength == 2048) {
++                readget_dh2048();
++                return dh_2048;
++            }
++        }
++    }
++    return 0;
++}
++
