@@ -142,8 +142,10 @@ int in_mio_callback(mio_t m, mio_action_t a, mio_fd_t fd, void *data, void *arg)
 
             flags = S2S_DB_HEADER;
 #ifdef HAVE_SSL
-            if(s2s->sx_ssl != NULL)
+            if(s2s->sx_ssl != NULL) {
                 flags |= SX_SSL_STARTTLS_OFFER;
+                if (s2s->require_tls) flags |= SX_SSL_STARTTLS_REQUIRE;
+            }
 #endif
 #ifdef HAVE_LIBZ
             if(s2s->compression)

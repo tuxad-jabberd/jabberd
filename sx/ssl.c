@@ -1072,6 +1072,7 @@ int sx_ssl_client_starttls(sx_plugin_t p, sx_t s, char *pemfile) {
     }
 
     /* go */
+    _sx_debug(ZONE, "sx_ssl_client_starttls: offer opportunistic TLS");
     jqueue_push(s->wbufq, _sx_buffer_new("<starttls xmlns='" uri_TLS "'/>", strlen(uri_TLS) + 20, NULL, NULL), 0);
     s->want_write = 1;
     _sx_event(s, event_WANT_WRITE, NULL);
