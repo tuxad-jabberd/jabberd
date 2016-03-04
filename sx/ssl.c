@@ -980,15 +980,6 @@ int sx_ssl_server_addcert(sx_plugin_t p, char *name, char *pemfile, char *cachai
         return 1;
     }
 
-/*
-    DH *dh = get_dh1024();
-    ret = SSL_CTX_set_tmp_dh (ctx, dh);
-    if(ret != 1) {
-        _sx_debug(ZONE, "couldn't set dh params with SSL_CTX_set_tmp_dh()");
-        DH_free (dh);
-        return 1;
-    }
-*/
     SSL_CTX_set_tmp_dh_callback(ctx, sx_ssl_tmp_dh_callback);
 
 #ifdef SSL_TXT_ECDH
